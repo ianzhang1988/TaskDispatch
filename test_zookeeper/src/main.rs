@@ -20,7 +20,92 @@ impl Watcher for LoggingWatcher {
     }
 }
 
+struct DummyWatcher;
+impl Watcher for DummyWatcher {
+    fn handle(&self, e: WatchedEvent) {
+        ()
+    }
+}
+
+//fn deleteall( &zk : ZooKeeper, path : str ){
+//}
+
+fn create_znode(zkserver : String, basepath : String) -> (u128, i32) {
+    let start = SystemTime::now();
+
+    let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).unwrap();
+
+    let path = zk.create(&basepath,
+                                                    vec![],
+                                                    Acl::open_unsafe().clone(),
+                                                    CreateMode::Persistent).expect("create failed");
+
+    let loop_num = 10000;
+
+    for i in 0..loop_num {
+        let path = zk.create(&format!("{}/{:010}",basepath, i),
+                                                    vec![],
+                                                    Acl::open_unsafe().clone(),
+                                                    CreateMode::Persistent);
+    }
+
+    let difference = start.elapsed().expect("Time went backwards");
+    (difference.as_millis(), loop_num)
+}
+
+fn test_create( zkserver : String, basepath : String, client_num : i32 ) {
+    let start = SystemTime::now();
+
+    let mut vec = Vec::new();
+
+    for i in 1..client_num {
+        let basepath_tmp = basepath.clone();
+        let zkserver_tmp = zkserver.clone();
+        let child = thread::spawn(  move|| {
+            create_znode(zkserver_tmp,format!("{}/{:010}",basepath_tmp,i) )
+        });
+        vec.push(child);
+    }
+
+    let mut time_sum : u128=0;
+    let mut num_sum = 0;
+    let mut idx = 0;
+    for i in vec {
+        let (time, num) = i.join().unwrap();
+        time_sum+=time;
+        num_sum+=num;
+        println!("avrage call time {}:{}",idx,time as f64/num as f64);
+        idx+=1;
+    }
+
+    println!("----------------------\navrage call time {}",time_sum as f64/num_sum as f64);
+
+    let difference = start.elapsed().expect("Time went backwards");
+    println!("test_create run time {:?}",difference)
+}
+
+fn test_thread( input : String, other : String ) -> String{
+    format!("{} {}", input , other)
+}
+
+fn test_thread_func(content:String){
+    let child = thread::spawn(  || {
+            test_thread(content,String::from("hi"))
+        });
+
+    let res = child.join().expect("thread join error");
+    println!("{}",res)
+}
+
 fn main() {
+
+    // test_thread_func(String::from("zhang"));
+//    let (time, num) = create_znode("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181", "/test/10");
+//    println!("time {} num {} avg {}", time, num , time as f64 / num as f64);
+
+    test_create("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181".to_string(), "/test".to_string(), 100);
+
+    return;
 
     let start = SystemTime::now();
 
@@ -33,6 +118,20 @@ fn main() {
 
     println!("children of / -> {:?}", children);
     println!("children of / -> {:?}", children);
+
+    let children2 = zk.get_children("/nopath", true);
+    match children2{
+        Ok(lst)=>println!("Ok {:?}",lst),
+        Err(e)=>println!("error {:?}",e)
+    }
+
+    let children3 = zk.get_children("/test", true).expect("get children error");
+    println!("children3 {:?}", children3);
+
+//    let children4 = zk.get_children("/nopath", true).expect("get children error");
+//    println!("children3 {:?}", children4);
+
+    // println!("nopath {:?}", children2);
 
     let mut vec = Vec::new();
 

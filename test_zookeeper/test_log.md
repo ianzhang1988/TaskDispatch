@@ -24,10 +24,27 @@ on my laptop
     >55.307s 100*10000 node created
 
 ## delete empty node
+on my laptop  
+* 1 client delete 10000 node take 1.3 ms/node
+* 100 client delete 10000 node in parallel. avg take 5.224 ms/node; 0.0544 ms/node in parallel
+    >54.4s 100*10000 node deleted
 
 ## set data
-
+on my laptop
+* 100 client set 10000 node in parallel, set 10000B data, avg take 94.0 ms/node; 0.94 ms/node in parallel
+    >take 945.0s to finish  
+    totally 9.3G data, when data get large, write snapshot severely decrease the speed of zookeeper 
+    (lower than 10G less than -Xmx10240m)   
+    increase snapCount in zoo.cfg may ease the problem
+* 100 client set 10000 node in parallel, set 1000B data, avg take 18.4ms/node; 0.184 ms/node in parallel
+    > 184s after last test, with 10_000B data
+* 100 client set 10000 node in parallel, set 1000B data, avg take 10.8ms/node; 0.108 ms/node in parallel
+    > 113.8s after last test, with 1_000B data
+    
 ## delete none empty node
+on my laptop
+* 100 client delete 10000 node in parallel. avg take 4.837 ms/node; 0.04837 ms/node in parallel
+    >59.06s 100*10000 node deleted
 
 ## get data
 

@@ -3,9 +3,16 @@ name = "test_zookeeper"
 version = "0.1.0"
 authors = ["yangzhang214024 <yangzhang214024@sohu-inc.com>"]
 
+[target.x86_64-unknown-linux-musl]
+#linker = "rust-lld"
+rustflags = ["-Z", "linker-flavor=ld"]
+
+[target.x86_64-unknown-linux-gnu]
+linker = "rust-lld"
+
+
 [dependencies]
 rand = "0.6.5"
 zookeeper = "0.5"
 log = "0.4"
 env_logger = "0.5"
-

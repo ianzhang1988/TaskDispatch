@@ -187,7 +187,7 @@ fn set_data(zkserver : String, basepath : String) -> Result<(u128, i32),String>{
 
         let mut rng = rand::thread_rng();
         let data_elem = rng.gen_range('A' as u8, 'Z' as u8);
-        let data = vec![data_elem;1000];
+        let data = vec![data_elem;100];
         zk.set_data( &format!("{}/{:010}",basepath, i), data, None );
     }
 
@@ -223,8 +223,132 @@ fn test_set_data( zkserver : String, basepath : String, client_num : i32 ) {
     println!("----------------------\navrage call time {}",time_sum as f64/num_sum as f64);
 
     let difference = start.elapsed().expect("Time went backwards");
-    println!("test_create run time {:?}",difference)
+    println!("test set data run time {:?}",difference)
 }
+
+fn get_data(zkserver : String, basepath : String) -> Result<(u128, i32),String>{
+    let start = SystemTime::now();
+
+    let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).unwrap();
+
+
+    let loop_num = 10000;
+    let mut data_size = 0;
+
+    for i in 0..loop_num {
+//        let path = zk.create(&format!("{}/{:010}",basepath, i),
+//                                                    vec![],
+//                                                    Acl::open_unsafe().clone(),
+//                                                    CreateMode::Persistent);
+
+        let (data, stat) = zk.get_data(&format!("{}/{:010}",basepath, i),false).unwrap();
+        data_size += data.len()
+    }
+
+    let difference = start.elapsed().expect("Time went backwards");
+    println!("node {} data size {}", basepath, data_size);
+    Ok((difference.as_millis(), loop_num))
+}
+
+fn test_get_data( zkserver : String, basepath : String, client_num : i32 ) {
+    let start = SystemTime::now();
+
+    let mut vec = Vec::new();
+
+    for i in 1..client_num {
+        let basepath_tmp = basepath.clone();
+        let zkserver_tmp = zkserver.clone();
+        let child = thread::spawn(  move|| {
+            get_data(zkserver_tmp,format!("{}/{:010}",basepath_tmp,i) )
+        });
+        vec.push(child);
+    }
+
+    let mut time_sum : u128=0;
+    let mut num_sum = 0;
+    let mut idx = 0;
+    for i in vec {
+        let (time, num) = i.join().unwrap().unwrap();
+        time_sum+=time;
+        num_sum+=num;
+        println!("avrage call time {}:{}",idx,time as f64/num as f64);
+        idx+=1;
+    }
+
+    println!("----------------------\navrage call time {}",time_sum as f64/num_sum as f64);
+
+    let difference = start.elapsed().expect("Time went backwards");
+    println!("test get data run time {:?}",difference)
+}
+
+fn set_and_get_data(zkserver : String, basepath : String) -> Result<(u128, i32),String>{
+    let start = SystemTime::now();
+
+    let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).unwrap();
+
+
+    let loop_num = 10000;
+    let mut data_size = 0;
+
+    for i in 0..loop_num {
+//        let path = zk.create(&format!("{}/{:010}",basepath, i),
+//                                                    vec![],
+//                                                    Acl::open_unsafe().clone(),
+//                                                    CreateMode::Persistent);
+        let mut rng = rand::thread_rng();
+
+        let flag = rng.gen_range(0 , 2);
+
+        match flag {
+            0=>{
+                let data_elem = rng.gen_range('A' as u8, 'Z' as u8);
+                let data = vec![data_elem;100];
+                zk.set_data( &format!("{}/{:010}",basepath, i), data, None );
+            },
+            1=>{
+                let (data, stat) = zk.get_data(&format!("{}/{:010}",basepath, i),false).unwrap();
+                data_size += data.len();
+            },
+            _=> println!("unexpected rand num: {}", flag ),
+        }
+    }
+
+    println!("node {} data size {}", basepath, data_size);
+    let difference = start.elapsed().expect("Time went backwards");
+    Ok((difference.as_millis(), loop_num))
+}
+
+fn test_set_and_get_data( zkserver : String, basepath : String, client_num : i32 ) {
+    let start = SystemTime::now();
+
+    let mut vec = Vec::new();
+
+    for i in 1..client_num {
+        let basepath_tmp = basepath.clone();
+        let zkserver_tmp = zkserver.clone();
+        let child = thread::spawn(  move|| {
+            set_and_get_data(zkserver_tmp,format!("{}/{:010}",basepath_tmp,i) )
+        });
+        vec.push(child);
+    }
+
+    let mut time_sum : u128=0;
+    let mut num_sum = 0;
+    let mut idx = 0;
+    for i in vec {
+        let (time, num) = i.join().unwrap().unwrap();
+        time_sum+=time;
+        num_sum+=num;
+        println!("avrage call time {}:{}",idx,time as f64/num as f64);
+        idx+=1;
+    }
+
+    println!("----------------------\navrage call time {}",time_sum as f64/num_sum as f64);
+
+    let difference = start.elapsed().expect("Time went backwards");
+    println!("test set data run time {:?}",difference)
+}
+
 
 
 fn test_thread( input : String, other : String ) -> String{
@@ -341,10 +465,11 @@ fn main() {
 //    println!("delete time {} num {} avg {}", time, num , time as f64 / num as f64);
 
 
-//    test_create("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181".to_string(), "/test".to_string(), 100);
-    test_delete("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181".to_string(), "/test".to_string(), 100);
-    // test_set_data("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181".to_string(), "/test".to_string(), 100);
-
+    // test_create("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181".to_string(), "/test".to_string(), 100);
+    // test_delete("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181".to_string(), "/test".to_string(), 1000);
+    test_set_data("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181".to_string(), "/test".to_string(), 1000);
+    // test_get_data("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181".to_string(), "/test".to_string(), 100);
+    //test_set_and_get_data("10.19.17.188:2181,10.18.29.181:2181,10.19.16.30:2181".to_string(), "/test".to_string(), 100);
 
     return;
 }

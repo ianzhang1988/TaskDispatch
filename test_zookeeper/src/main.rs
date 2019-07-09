@@ -9,10 +9,10 @@ use std::str;
 use std::thread;
 use std::time::Duration;
 use zookeeper::{Acl, CreateMode, Watcher, WatchedEvent, ZooKeeper};
+use zookeeper::ZkError;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::thread::sleep;
 use std::process::Command;
-use zookeeper::ZkError;
 
 extern crate rand;
 use rand::Rng;

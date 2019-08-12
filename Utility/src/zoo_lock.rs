@@ -17,6 +17,7 @@ use errors::RcpError;
 struct Lock{
     lock: Arc<Mutex<InnerLock>>,
 
+
 }
 
 // got this idea form kazoo
@@ -104,7 +105,7 @@ impl InnerLock{
             Err(e) => return Err(RcpError::ZkErr(e)),
         };
 
-        let node_path = self.zk.create(&self.create_path, vec![],
+        let node_path = self.zk.create(&self.create_path, self.identifier.as_bytes().to_vec(),
                             Acl::open_unsafe().clone(),
                             CreateMode::EphemeralSequential)?;
 
@@ -122,20 +123,24 @@ impl InnerLock{
             }
 
             let pre = self.predecessor()?;
+            println!("predecessor {}", pre);
 
             // self.zk.get_data_w(&pre, watch_change );
             // self.zk.get_data_w(&pre, |event| self.watch_change(event) );
-            // self.zk.get_data_w(&pre, |event| self.watch_tx.send(()).unwrap() );
+            let watch_tx = self.watch_tx.clone();
+            self.zk.get_data_w(&format!("{}/{}",self.path,&pre), move |event| watch_tx.send(()).unwrap() );
             self.wait_for_change();
         }
     }
 
-    fn watch_change(&self, event : WatchedEvent) {
-        self.watch_tx.send(()).unwrap();
-    }
+//    fn watch_change(&self, event : WatchedEvent) {
+//        self.watch_tx.send(()).unwrap();
+//    }
 
     fn wait_for_change(&self){
+        // println!("wait_for_change");
         self.change_rx.recv().unwrap();
+        // println!("changed");
     }
 
     fn get_sorted_children(&self)->Result<Vec<String>, RcpError>{
@@ -143,10 +148,14 @@ impl InnerLock{
         children.sort_by_key( |x|{
             for name in vec!["__lock__","__rlock__"]{
                 match x.find(&name){
-                    Some(pos) => &x[pos+name.len()..],
+                    Some(pos) => {
+                        println!("key {}",&x[pos+name.len()..]);
+                        return (&x[pos+name.len()..]).to_string();
+                        },
                     None => "~",
                 };
             };
+            "~".to_string()
         });
         Ok(children)
     }
@@ -179,7 +188,7 @@ impl InnerLock{
         Ok(children[pos -1].clone())
     }
 
-    fn release(&mut self)->Result<bool, RcpError>{
+    pub fn release(&mut self)->Result<bool, RcpError>{
         if ! &self.is_acquired {
             return Ok(false);
         }
@@ -198,7 +207,10 @@ impl InnerLock{
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration,Instant};
+    use std::time;
+    use std::thread;
+    use std::sync;
 
     struct LoggingWatcher;
     impl Watcher for LoggingWatcher {
@@ -214,10 +226,21 @@ mod tests {
         }
     }
 
+    fn connect<W>( watcher: W)
+        where W: Watcher + 'static
+    {
+        let w = watcher;
+//        let () = w;
+    }
+
     #[test]
     fn test_internal_lock() {
 
         let zkserver= "127.0.0.1:2181";
+
+        let dummpy_watcher = sync::Arc::new(Box::new(DummyWatcher));
+        connect(DummyWatcher);
+
         let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug 1");
         let zkptr = Arc::new(Box::new(zk));
         let mut in_lock = InnerLock::new(zkptr.clone(),"/test/lock".to_string(),"test".to_string(), LockType::Lock);
@@ -226,5 +249,46 @@ mod tests {
         assert_eq!(result, true);
         let result2 = in_lock.release().expect("debug 3");
         assert_eq!(result2, true);
+    }
+
+    #[test]
+    fn test_two_internal_lock(){
+        let zkserver= "127.0.0.1:2181";
+        let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug main 1");
+        let zkptr = Arc::new(Box::new(zk));
+        let mut in_lock_1 = InnerLock::new(zkptr.clone(),"/test/lock2".to_string(),"main".to_string(), LockType::Lock);
+
+        let zkptr_thread = zkptr.clone();
+        let handle = thread::spawn(|| -> Instant{
+            thread::sleep_ms(1000);
+            let mut in_lock_2 = InnerLock::new(zkptr_thread,"/test/lock2".to_string(),"thread".to_string(), LockType::Lock);
+
+            let result = in_lock_2.acquire().expect("debug thread 2");
+            assert_eq!(result, true);
+
+
+            let got_lock = Instant::now();
+            thread::sleep_ms(1000);
+
+            let result2 = in_lock_2.release().expect("debug thread 3");
+            assert_eq!(result2, true);
+
+            got_lock
+        });
+
+        let result = in_lock_1.acquire().expect("debug main 2");
+        assert_eq!(result, true);
+
+        let got_lock = Instant::now();
+        thread::sleep_ms(5000);
+        let elapse = got_lock.elapsed();
+
+        let result2 = in_lock_1.release().expect("debug main 3");
+        assert_eq!(result2, true);
+
+        let thread_got_lock = handle.join().expect("debug main 4");
+
+        let time_diff = thread_got_lock - got_lock;
+        assert!(time_diff > elapse);
     }
 }

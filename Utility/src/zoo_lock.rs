@@ -15,9 +15,8 @@ use self::zookeeper::ZooKeeperExt;
 use errors::RcpError;
 
 struct Lock{
+    /// use Mutex to ensure thread safety
     lock: Arc<Mutex<InnerLock>>,
-
-
 }
 
 // got this idea form kazoo
@@ -202,6 +201,32 @@ impl InnerLock{
     }
 }
 
+impl Lock {
+    pub fn new(zk: Arc<Box<ZooKeeper>>, path : String, identifier : String, lock_type :LockType ) -> Lock{
+        let mut lock = Lock{
+            lock: Arc::new(Mutex::new(InnerLock::new(zk,path,identifier,lock_type))),
+        };
+
+        lock
+    }
+
+    pub fn acquire(&self)->Result<bool, RcpError>{
+        self.lock
+            .lock()
+            //.unwrap()
+            .unwrap_or_else(|e| e.into_inner())
+            .acquire()
+    }
+
+    pub fn release(&self)->Result<bool, RcpError>{
+        self.lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .release()
+    }
+}
+
+
 #[cfg(test)]
 
 mod tests {
@@ -290,5 +315,51 @@ mod tests {
 
         let time_diff = thread_got_lock - got_lock;
         assert!(time_diff > elapse);
+    }
+
+    #[test]
+    fn test_two_lock(){
+        let zkserver= "127.0.0.1:2181";
+        let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug main 1");
+        let zkptr = Arc::new(Box::new(zk));
+        let mut in_lock_1 = Lock::new(zkptr.clone(),"/test/lock2".to_string(),"main".to_string(), LockType::Lock);
+
+        let zkptr_thread = zkptr.clone();
+        let handle = thread::spawn(|| -> Instant{
+            thread::sleep_ms(1000);
+            let mut in_lock_2 = Lock::new(zkptr_thread,"/test/lock2".to_string(),"thread".to_string(), LockType::Lock);
+
+            let result = in_lock_2.acquire().expect("debug thread 2");
+            assert_eq!(result, true);
+
+
+            let got_lock = Instant::now();
+            thread::sleep_ms(1000);
+
+            let result2 = in_lock_2.release().expect("debug thread 3");
+            assert_eq!(result2, true);
+
+            got_lock
+        });
+
+        let result = in_lock_1.acquire().expect("debug main 2");
+        assert_eq!(result, true);
+
+        let got_lock = Instant::now();
+        thread::sleep_ms(5000);
+        let elapse = got_lock.elapsed();
+
+        let result2 = in_lock_1.release().expect("debug main 3");
+        assert_eq!(result2, true);
+
+        let thread_got_lock = handle.join().expect("debug main 4");
+
+        let time_diff = thread_got_lock - got_lock;
+        assert!(time_diff > elapse);
+    }
+
+    #[test]
+    fn test_multi_process_lock(){
+
     }
 }

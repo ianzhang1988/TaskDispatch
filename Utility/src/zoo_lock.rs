@@ -6,17 +6,19 @@ extern crate uuid;
 // use std::String;
 use std::sync::{Arc, Mutex, mpsc};
 use std::sync::mpsc::{Sender,Receiver};
-// use std::Vec;
 use self::uuid::Uuid;
 use self::zookeeper::{Acl, CreateMode, WatchedEvent, Watcher, ZooKeeper,ZkResult};
 use self::zookeeper::ZooKeeperExt;
-
-// mod errors;
 use errors::RcpError;
 
 struct Lock{
     /// use Mutex to ensure thread safety
-    lock: Arc<Mutex<InnerLock>>,
+    //lock: Arc<Mutex<InnerLock>>,
+    lock: Mutex<InnerLock>,
+}
+
+struct CriticalSection{
+    lock : InnerLock,
 }
 
 // got this idea form kazoo
@@ -204,7 +206,8 @@ impl InnerLock{
 impl Lock {
     pub fn new(zk: Arc<Box<ZooKeeper>>, path : String, identifier : String, lock_type :LockType ) -> Lock{
         let mut lock = Lock{
-            lock: Arc::new(Mutex::new(InnerLock::new(zk,path,identifier,lock_type))),
+            // lock: Arc::new(Mutex::new(InnerLock::new(zk,path,identifier,lock_type))),
+            lock: Mutex::new(InnerLock::new(zk,path,identifier,lock_type)),
         };
 
         lock
@@ -226,16 +229,36 @@ impl Lock {
     }
 }
 
+impl CriticalSection{
+    pub fn new( zk: Arc<Box<ZooKeeper>>, path : String, identifier : String)->Arc<Mutex<CriticalSection>>{
+        let cs = Arc::new(Mutex::new(
+            CriticalSection{lock:InnerLock::new(zk,path,identifier,LockType::Lock)}));
+        cs
+    }
+
+    pub fn guard<F:Fn()>(&mut self, fun: F)->Result<(), RcpError>{
+        self.lock.acquire()?;
+        fun();
+        self.lock.release()?;
+        Ok(())
+    }
+}
+
 
 #[cfg(test)]
 
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
+    extern crate core;
+
     use super::*;
     use std::time::{Duration,Instant};
     use std::time;
     use std::thread;
     use std::sync;
+    use std::cell::Cell;
+    use self::core::sync::atomic;
+    use self::core::sync::atomic::Ordering;
 
     struct LoggingWatcher;
     impl Watcher for LoggingWatcher {
@@ -322,12 +345,12 @@ mod tests {
         let zkserver= "127.0.0.1:2181";
         let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug main 1");
         let zkptr = Arc::new(Box::new(zk));
-        let mut in_lock_1 = Lock::new(zkptr.clone(),"/test/lock2".to_string(),"main".to_string(), LockType::Lock);
+        let mut in_lock_1 = Lock::new(zkptr.clone(),"/test/lock3".to_string(),"main".to_string(), LockType::Lock);
 
         let zkptr_thread = zkptr.clone();
         let handle = thread::spawn(|| -> Instant{
             thread::sleep_ms(1000);
-            let mut in_lock_2 = Lock::new(zkptr_thread,"/test/lock2".to_string(),"thread".to_string(), LockType::Lock);
+            let mut in_lock_2 = Lock::new(zkptr_thread,"/test/lock3".to_string(),"thread".to_string(), LockType::Lock);
 
             let result = in_lock_2.acquire().expect("debug thread 2");
             assert_eq!(result, true);
@@ -359,7 +382,38 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_process_lock(){
+    fn test_critical_section() {
+        let zkserver= "127.0.0.1:2181";
+        let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug main 1");
+        let zkptr = Arc::new(Box::new(zk));
+        let cs = CriticalSection::new(zkptr.clone(),"/test/lock4".to_string(),"".to_string());
+        let mut thread_handle = vec!();
 
+        /// unsafe in thread
+        // let mut counter = Arc::new(Cell::new(0));
+
+        let mut counter = Arc::new(atomic::AtomicUsize::new(0));
+
+
+
+        for i in 0..10{
+            let mut cs_tmp = cs.clone();
+            let mut counter_tmp = counter.clone();
+            let handle = thread::spawn( move ||{
+                let func = || { (*counter_tmp).store( (*counter_tmp).load(Ordering::Relaxed) + 1, Ordering::Relaxed) };
+                cs_tmp.lock()
+                      .unwrap_or_else(|e| e.into_inner())
+                      .guard(func);
+            });
+            thread_handle.push(handle);
+        }
+
+        for h in thread_handle{
+            h.join().expect("debug main q");
+        }
+
+        //assert_eq!((*counter).get(), 10);
+        assert_eq!(counter.load(Ordering::Relaxed), 10);
     }
+
 }

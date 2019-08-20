@@ -1,6 +1,5 @@
 // #![deny(unused_mut)]
 extern crate zookeeper;
-
 extern crate uuid;
 
 // use std::String;
@@ -11,14 +10,25 @@ use self::zookeeper::{Acl, CreateMode, WatchedEvent, Watcher, ZooKeeper,ZkResult
 use self::zookeeper::ZooKeeperExt;
 use errors::RcpError;
 
+/// try implement idiom of lock with acquire and release
+/// yet, not so successful
 struct Lock{
     /// use Mutex to ensure thread safety
     //lock: Arc<Mutex<InnerLock>>,
-    lock: Mutex<InnerLock>,
+    lock: Mutex<ZkDistrLock>,
 }
 
-struct CriticalSection{
-    lock : InnerLock,
+/// protect code section in multi thread situation
+struct ZkCriticalSection {
+    lock : ZkDistrLock,
+}
+
+/// todo: critical section for ReadWrite Lock
+struct ReadCriticalSection{
+    lock : ZkDistrLock,
+}
+struct WirteCriticalSection{
+    lock : ZkDistrLock,
 }
 
 // got this idea form kazoo
@@ -48,7 +58,7 @@ enum LockType{
 //    fn get_name(&self) { ("__lock__", vec![Strint("__lock__"),Strint("__rlock__")] ) }
 //}
 
-struct InnerLock{
+struct ZkDistrLock {
     zk: Arc<Box<ZooKeeper>>,
     is_acquired : bool,
     path : String,
@@ -61,10 +71,11 @@ struct InnerLock{
     node:String,
     watch_tx : Sender<()>,
     change_rx : Receiver<()>,
+    canceled: bool,
 }
 
-impl InnerLock{
-    pub fn new(zk: Arc<Box<ZooKeeper>>, path : String, identifier : String, lock_type :LockType ) -> InnerLock{
+impl ZkDistrLock {
+    pub fn new(zk: Arc<Box<ZooKeeper>>, path : String, identifier : String, lock_type :LockType ) -> ZkDistrLock {
         let (node_name, exclude_names)= match lock_type {
             LockType::Lock => ("__lock__", vec!["__lock__".to_string(),"__rlock__".to_string()] ),
             LockType::ReadLock => ("__rlock__", vec!["__lock__".to_string()] ),
@@ -78,7 +89,7 @@ impl InnerLock{
 
         let (tx, rx) = mpsc::channel();
 
-        let mut lock = InnerLock{
+        let mut lock = ZkDistrLock {
             zk: zk,
             is_acquired : false,
             path: path,
@@ -91,6 +102,7 @@ impl InnerLock{
             node:"".to_string().clone(),
             watch_tx: tx,
             change_rx: rx,
+            canceled: false,
         };
 
         lock
@@ -112,25 +124,29 @@ impl InnerLock{
 
         self.node = (&node_path)[self.path.len() + 1..].to_string();
 
-        println!("node {}",&self.node);
+        // println!("node {}",&self.node);
 
 
         loop{
             let is_first = self.is_first()?;
-            println!("is first {}", is_first);
+            // println!("is first {}", is_first);
             if is_first {
                 self.is_acquired = true;
                 return  Ok(true)
             }
 
             let pre = self.predecessor()?;
-            println!("predecessor {}", pre);
+            // println!("predecessor {}", pre);
 
             // self.zk.get_data_w(&pre, watch_change );
             // self.zk.get_data_w(&pre, |event| self.watch_change(event) );
             let watch_tx = self.watch_tx.clone();
             self.zk.get_data_w(&format!("{}/{}",self.path,&pre), move |event| watch_tx.send(()).unwrap() );
             self.wait_for_change();
+
+            if self.canceled {
+                return Ok(false)
+            }
         }
     }
 
@@ -150,7 +166,7 @@ impl InnerLock{
             for name in vec!["__lock__","__rlock__"]{
                 match x.find(&name){
                     Some(pos) => {
-                        println!("key {}",&x[pos+name.len()..]);
+                        // println!("key {}",&x[pos+name.len()..]);
                         return (&x[pos+name.len()..]).to_string();
                         },
                     None => "~",
@@ -163,7 +179,7 @@ impl InnerLock{
 
     fn is_first(&self)->Result<bool, RcpError>{
         let children = self.get_sorted_children()?;
-        println!("{:?}",&children);
+        // println!("{:?}",&children);
 
         if children.len() < 1 {
             return Err(RcpError::InternalError);
@@ -182,9 +198,10 @@ impl InnerLock{
         let children = self.get_sorted_children()?;
         let pos = match &children.iter().position(| ref x| *x == &self.node) {
             Some(pos) => pos.clone(),
-            None => {println!("bug happen");return Err(RcpError::InternalError)},
+            None => {// println!("bug happen");
+                return Err(RcpError::InternalError)},
         };
-        println!("debug pos {}",pos);
+        // println!("debug pos {}",pos);
 
         Ok(children[pos -1].clone())
     }
@@ -201,13 +218,19 @@ impl InnerLock{
 
         Ok(true)
     }
+
+    pub fn cancel(&mut self)->Result<(), RcpError>{
+        self.canceled = true;
+        self.watch_tx.send(()).unwrap();
+        Ok(())
+    }
 }
 
 impl Lock {
     pub fn new(zk: Arc<Box<ZooKeeper>>, path : String, identifier : String, lock_type :LockType ) -> Lock{
         let mut lock = Lock{
             // lock: Arc::new(Mutex::new(InnerLock::new(zk,path,identifier,lock_type))),
-            lock: Mutex::new(InnerLock::new(zk,path,identifier,lock_type)),
+            lock: Mutex::new(ZkDistrLock::new(zk, path, identifier, lock_type)),
         };
 
         lock
@@ -229,10 +252,10 @@ impl Lock {
     }
 }
 
-impl CriticalSection{
-    pub fn new( zk: Arc<Box<ZooKeeper>>, path : String, identifier : String)->Arc<Mutex<CriticalSection>>{
+impl ZkCriticalSection {
+    pub fn new( zk: Arc<Box<ZooKeeper>>, path : String, identifier : String)->Arc<Mutex<ZkCriticalSection>>{
         let cs = Arc::new(Mutex::new(
-            CriticalSection{lock:InnerLock::new(zk,path,identifier,LockType::Lock)}));
+            ZkCriticalSection {lock: ZkDistrLock::new(zk, path, identifier, LockType::Lock)}));
         cs
     }
 
@@ -291,7 +314,7 @@ mod tests {
 
         let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug 1");
         let zkptr = Arc::new(Box::new(zk));
-        let mut in_lock = InnerLock::new(zkptr.clone(),"/test/lock".to_string(),"test".to_string(), LockType::Lock);
+        let mut in_lock = ZkDistrLock::new(zkptr.clone(), "/test/lock".to_string(), "test".to_string(), LockType::Lock);
         // let in_lock_2 = InnerLock::new(zkptr.clone(),"/test/lock".to_string(),"test".to_string(), LockType::Lock);
         let result = in_lock.acquire().expect("debug 2");
         assert_eq!(result, true);
@@ -304,12 +327,12 @@ mod tests {
         let zkserver= "127.0.0.1:2181";
         let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug main 1");
         let zkptr = Arc::new(Box::new(zk));
-        let mut in_lock_1 = InnerLock::new(zkptr.clone(),"/test/lock2".to_string(),"main".to_string(), LockType::Lock);
+        let mut in_lock_1 = ZkDistrLock::new(zkptr.clone(), "/test/lock2".to_string(), "main".to_string(), LockType::Lock);
 
         let zkptr_thread = zkptr.clone();
         let handle = thread::spawn(|| -> Instant{
             thread::sleep_ms(1000);
-            let mut in_lock_2 = InnerLock::new(zkptr_thread,"/test/lock2".to_string(),"thread".to_string(), LockType::Lock);
+            let mut in_lock_2 = ZkDistrLock::new(zkptr_thread, "/test/lock2".to_string(), "thread".to_string(), LockType::Lock);
 
             let result = in_lock_2.acquire().expect("debug thread 2");
             assert_eq!(result, true);
@@ -386,7 +409,7 @@ mod tests {
         let zkserver= "127.0.0.1:2181";
         let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug main 1");
         let zkptr = Arc::new(Box::new(zk));
-        let cs = CriticalSection::new(zkptr.clone(),"/test/lock4".to_string(),"".to_string());
+        let cs = ZkCriticalSection::new(zkptr.clone(), "/test/lock4".to_string(), "".to_string());
         let mut thread_handle = vec!();
 
         /// unsafe in thread
@@ -409,11 +432,60 @@ mod tests {
         }
 
         for h in thread_handle{
-            h.join().expect("debug main q");
+            h.join().expect("debug main 2");
         }
 
         //assert_eq!((*counter).get(), 10);
         assert_eq!(counter.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn test_cancel() {
+        let zkserver= "127.0.0.1:2181";
+        let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug main 1");
+        let zkptr = Arc::new(Box::new(zk));
+
+        let mut lock_1 = ZkDistrLock::new(zkptr.clone(), "/test/lock5".to_string(), "main_cancel".to_string(), LockType::Lock);
+        let lock1_handle = Arc::new(Mutex::new(Box::new(lock_1)));
+        let lock1_handle_2 = lock1_handle.clone();
+
+        let zkptr_thread = zkptr.clone();
+        let handle = thread::spawn(move || {
+            let mut in_lock_2 = ZkDistrLock::new(zkptr_thread, "/test/lock5".to_string(), "thread_cancel".to_string(), LockType::Lock);
+
+            let result = in_lock_2.acquire().expect("debug thread 2");
+            assert_eq!(result, true);
+            thread::sleep_ms(2000);
+
+            lock1_handle_2.lock() // dead lock
+                .expect("debug 2.1")
+                .cancel()
+                .expect("debug 2.2");
+
+            thread::sleep_ms(5000);
+
+            let result2 = in_lock_2.release().expect("debug thread 3");
+            assert_eq!(result2, true);
+
+        });
+
+        thread::sleep_ms(1000);
+
+        let result = lock1_handle.lock() // dead lock
+            .expect("debug main 2")
+            .acquire()
+            .expect("debug main 2.1");
+
+        assert_eq!(result, false);
+
+
+        let result2 = lock1_handle.lock()
+            .expect("debug main 3")
+            .release()
+            .expect("debug main 3.1");
+        assert_eq!(result2, true);
+
+        handle.join().expect("debug main 4");
     }
 
 }

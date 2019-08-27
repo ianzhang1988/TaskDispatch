@@ -7,3 +7,4 @@ authors = ["yangzhang214024 <yangzhang214024@sohu-inc.com>"]
 zookeeper = "0.5"
 log = "0.4"
 uuid = { version = "0.2", features = ["serde", "v4"] }
+crossbeam = "0.7"

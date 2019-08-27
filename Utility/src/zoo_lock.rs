@@ -1,14 +1,21 @@
 // #![deny(unused_mut)]
 extern crate zookeeper;
 extern crate uuid;
+extern crate crossbeam;
 
 // use std::String;
 use std::sync::{Arc, Mutex, mpsc};
 use std::sync::mpsc::{Sender,Receiver};
+use std::sync::atomic::{
+    AtomicBool,
+    Ordering::SeqCst,
+};
 use self::uuid::Uuid;
 use self::zookeeper::{Acl, CreateMode, WatchedEvent, Watcher, ZooKeeper,ZkResult};
 use self::zookeeper::ZooKeeperExt;
 use errors::RcpError;
+// use self::crossbeam;
+
 
 /// try implement idiom of lock with acquire and release
 /// yet, not so successful
@@ -71,7 +78,8 @@ struct ZkDistrLock {
     node:String,
     watch_tx : Sender<()>,
     change_rx : Receiver<()>,
-    canceled: bool,
+    // canceled: bool,
+    canceled: Arc<AtomicBool>,
 }
 
 impl ZkDistrLock {
@@ -102,7 +110,7 @@ impl ZkDistrLock {
             node:"".to_string().clone(),
             watch_tx: tx,
             change_rx: rx,
-            canceled: false,
+            canceled: Arc::new(AtomicBool::new(false)),
         };
 
         lock
@@ -144,7 +152,7 @@ impl ZkDistrLock {
             self.zk.get_data_w(&format!("{}/{}",self.path,&pre), move |event| watch_tx.send(()).unwrap() );
             self.wait_for_change();
 
-            if self.canceled {
+            if self.canceled.load(SeqCst) {
                 return Ok(false)
             }
         }
@@ -219,11 +227,18 @@ impl ZkDistrLock {
         Ok(true)
     }
 
-    pub fn cancel(&mut self)->Result<(), RcpError>{
-        self.canceled = true;
-        self.watch_tx.send(()).unwrap();
-        Ok(())
-    }
+//    pub fn cancel(&self) ->Box<Fn()> {
+//
+//        let canceled = self.canceled.clone();
+//        let watch_tx = self.watch_tx.clone();
+//
+//        let cancel_closure= move | |{
+//            canceled.store(true, SeqCst);
+//            watch_tx.send(()).unwrap();
+//        };
+//
+//        Box::new(cancel_closure)
+//    }
 }
 
 impl Lock {
@@ -269,7 +284,6 @@ impl ZkCriticalSection {
 
 
 #[cfg(test)]
-
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     extern crate core;
@@ -439,53 +453,61 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 10);
     }
 
-    #[test]
-    fn test_cancel() {
-        let zkserver= "127.0.0.1:2181";
-        let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug main 1");
-        let zkptr = Arc::new(Box::new(zk));
+    // try to make cancel work, but really lack knowledge of how sharing struct between thread
+    // this is being counterproductive, I should just leave it here, try learn more.
 
-        let mut lock_1 = ZkDistrLock::new(zkptr.clone(), "/test/lock5".to_string(), "main_cancel".to_string(), LockType::Lock);
-        let lock1_handle = Arc::new(Mutex::new(Box::new(lock_1)));
-        let lock1_handle_2 = lock1_handle.clone();
-
-        let zkptr_thread = zkptr.clone();
-        let handle = thread::spawn(move || {
-            let mut in_lock_2 = ZkDistrLock::new(zkptr_thread, "/test/lock5".to_string(), "thread_cancel".to_string(), LockType::Lock);
-
-            let result = in_lock_2.acquire().expect("debug thread 2");
-            assert_eq!(result, true);
-            thread::sleep_ms(2000);
-
-            lock1_handle_2.lock() // dead lock
-                .expect("debug 2.1")
-                .cancel()
-                .expect("debug 2.2");
-
-            thread::sleep_ms(5000);
-
-            let result2 = in_lock_2.release().expect("debug thread 3");
-            assert_eq!(result2, true);
-
-        });
-
-        thread::sleep_ms(1000);
-
-        let result = lock1_handle.lock() // dead lock
-            .expect("debug main 2")
-            .acquire()
-            .expect("debug main 2.1");
-
-        assert_eq!(result, false);
-
-
-        let result2 = lock1_handle.lock()
-            .expect("debug main 3")
-            .release()
-            .expect("debug main 3.1");
-        assert_eq!(result2, true);
-
-        handle.join().expect("debug main 4");
-    }
+//    #[test]
+//    fn test_cancel() {
+//
+//        //let handle = thread::scoped(move || {
+//        crossbeam::scope(|scope| {
+//            let zkserver= "127.0.0.1:2181";
+//            let zk = ZooKeeper::connect(&zkserver, Duration::from_secs(15), DummyWatcher).expect("debug main 1");
+//            let zkptr = Arc::new(Box::new(zk));
+//
+//            let mut lock_1 = ZkDistrLock::new(zkptr.clone(), "/test/lock5".to_string(), "main_cancel".to_string(), LockType::Lock);
+//            let cancel = (&lock_1).cancel();
+//
+//            let lock1_handle = Arc::new(Box::new(lock_1));
+//            let lock1_handle_2 = lock1_handle.clone();
+//
+//            let zkptr_thread = zkptr.clone();
+//
+//
+//            scope.spawn(move |_| {
+//                let mut in_lock_2 = ZkDistrLock::new(zkptr_thread, "/test/lock5".to_string(), "thread_cancel".to_string(), LockType::Lock);
+//
+//                let result = in_lock_2.acquire().expect("debug thread 2");
+//                assert_eq!(result, true);
+//                thread::sleep_ms(2000);
+//
+////                lock1_handle_2
+////                    .cancel();
+//                //.expect("debug 2");
+//
+//                cancel();
+//
+//                thread::sleep_ms(5000);
+//
+//                let result2 = in_lock_2.release().expect("debug thread 3");
+//                assert_eq!(result2, true);
+//            });
+//
+//            thread::sleep_ms(1000);
+//
+//            let result = lock1_handle
+//                .acquire()
+//                .expect("debug main 2.1");
+//
+//            assert_eq!(result, false);
+//
+//
+//            let result2 = lock1_handle
+//                .release()
+//                .expect("debug main 3.1");
+//            assert_eq!(result2, true);
+//
+//        });
+//    }
 
 }
